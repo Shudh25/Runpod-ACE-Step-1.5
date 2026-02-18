@@ -1,0 +1,10 @@
+{
+  "input": {
+    "prompt": "An upbeat electronic track with a driving bassline",
+    "tags": "electronic, upbeat, energetic",
+    "duration": 15.0,
+    "steps": 60,
+    "cfg_strength": 4.5,
+    "seed": 42
+  }
+}
