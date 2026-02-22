@@ -1,0 +1,116 @@
+# =============================================================================
+# ACE-Step 1.5 - RunPod Serverless TRAINING Worker
+# Target GPU: A100 80GB
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: Model Downloader
+# Only need base model + VAE for training (not turbo, not LM)
+# -----------------------------------------------------------------------------
+FROM python:3.11-slim as model-downloader
+
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
+
+WORKDIR /models
+
+RUN pip install --no-cache-dir "huggingface-hub[cli,hf_transfer]"
+
+# Enable fast transfers
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+# Download main bundle — contains VAE + Qwen3-Embedding (text encoder)
+# Exclude turbo DiT and LM models (not needed for training)
+RUN python -c "
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(
+    'ACE-Step/Ace-Step1.5',
+    local_dir='/models/checkpoints',
+    token=os.environ.get('HF_TOKEN'),
+    ignore_patterns=[
+        'acestep-v15-turbo/*',
+        'acestep-5Hz-lm-1.7B/*',
+    ]
+)
+"
+
+# Download the base DiT model (training target — NOT turbo)
+RUN python -c "
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(
+    'ACE-Step/acestep-v15-base',
+    local_dir='/models/checkpoints/acestep-v15-base',
+    token=os.environ.get('HF_TOKEN'),
+)
+"
+
+
+# -----------------------------------------------------------------------------
+# Stage 2: Runtime — needs cudnn devel for training ops
+# -----------------------------------------------------------------------------
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04 as runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    # Point ACE-Step at the baked-in checkpoints
+    CHECKPOINT_DIR=/app/checkpoints \
+    DIT_MODEL=acestep-v15-base \
+    LM_MODEL=acestep-5Hz-lm-1.7B \
+    DEVICE=cuda
+
+WORKDIR /app
+
+# System deps — includes ffmpeg for audio processing during preprocessing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    git \
+    curl \
+    build-essential \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python
+
+# uv for fast installs
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Clone ACE-Step and install with training extras
+RUN git clone https://github.com/ace-step/ACE-Step-1.5.git /app && \
+    rm -rf /app/.git
+
+# Install base package
+RUN uv pip install --system --no-cache .
+
+# Training-specific deps:
+#   bitsandbytes  — 8-bit Adam optimizer (saves ~8GB VRAM on A100)
+#   boto3         — S3 upload of finished LoRA weights
+#   wandb         — optional training metrics (disabled by default)
+#   lightning     — pytorch-lightning for the trainer
+RUN uv pip install --system --no-cache \
+    runpod \
+    boto3 \
+    bitsandbytes \
+    wandb \
+    pytorch-lightning \
+    torchmetrics
+
+# Symlink so ACE-Step model discovery works
+RUN ln -s /app/checkpoints /usr/local/lib/python3.11/dist-packages/checkpoints
+
+# Copy baked-in checkpoints from downloader stage
+COPY --from=model-downloader /models/checkpoints /app/checkpoints
+
+# Create directories
+RUN mkdir -p /app/outputs /tmp/training
+
+# Copy handler
+COPY training_handler.py /app/training_handler.py
+
+CMD ["python", "-u", "/app/training_handler.py"]
