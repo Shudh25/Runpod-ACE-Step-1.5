@@ -1,11 +1,12 @@
 # =============================================================================
 # ACE-Step 1.5 - RunPod Serverless TRAINING Worker
 # Target GPU: A100 80GB
-# Output: RunPod Network Volume
+# Output: RunPod Network Volume only
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # Stage 1: Model Downloader
+# Only base DiT + VAE needed — no LM, no turbo
 # -----------------------------------------------------------------------------
 FROM python:3.11-slim AS model-downloader
 
@@ -15,10 +16,10 @@ ENV HF_TOKEN=${HF_TOKEN}
 WORKDIR /models
 
 RUN pip install --no-cache-dir "huggingface-hub[cli,hf_transfer]"
-
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
-# Main bundle: VAE + Qwen3-Embedding — skip turbo DiT and LM (not needed for training)
+# Main bundle: VAE + Qwen3-Embedding text encoder
+# Skip LM — not needed for training
 RUN python -c "import os; from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/Ace-Step1.5', local_dir='/models/checkpoints', token=os.environ.get('HF_TOKEN'), ignore_patterns=['acestep-v15-turbo/*', 'acestep-5Hz-lm-1.7B/*'])"
 
 # Base DiT — the model LoRA trains on top of
@@ -69,7 +70,14 @@ RUN uv pip install --system --no-cache \
 
 RUN ln -s /app/checkpoints /usr/local/lib/python3.11/dist-packages/checkpoints
 
+# Copy baked-in checkpoints
 COPY --from=model-downloader /models/checkpoints /app/checkpoints
+
+# ── KEY FIX ──────────────────────────────────────────────────────────────────
+# check_main_model_exists() looks for acestep-v15-turbo regardless of which
+# DiT model we actually use. Without this placeholder it triggers a full
+# re-download at runtime, fills the disk, and the job dies.
+RUN mkdir -p /app/checkpoints/acestep-v15-turbo
 
 RUN mkdir -p /app/outputs /tmp/training
 

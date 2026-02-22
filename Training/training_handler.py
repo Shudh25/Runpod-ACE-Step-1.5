@@ -5,45 +5,45 @@ RunPod Serverless Training Handler for ACE-Step 1.5
 
 Pipeline: download audio → preprocess → train LoRA → save to Network Volume
 
-ENV VARS (set in RunPod endpoint config):
-  CHECKPOINT_DIR    Path to baked-in base model.  Default: /app/checkpoints
-  DIT_MODEL         DiT model name.               Default: acestep-v15-base
-  DEVICE                                           Default: cuda
-  LORA_OUTPUT_DIR   Network volume path for LoRA. Default: /runpod-volume/loras
+ENV VARS:
+  CHECKPOINT_DIR    Default: /app/checkpoints
+  DIT_MODEL         Default: acestep-v15-base
+  DEVICE            Default: cuda
+  LORA_OUTPUT_DIR   Default: /runpod-volume/loras
 
 INPUT:
 {
     "audio_files": [
         {
-            "url":           "https://...",       // presigned or public URL
+            "url":           "https://...",
             "filename":      "song1.mp3",
             "caption":       "Indie folk with fingerpicked guitar and soft vocals",
             "lyrics":        "[Verse 1]\nHello world\n\n[Chorus]\nLa la la",
-            "bpm":           120,                 // optional, null = auto
-            "keyscale":      "C major",           // optional
-            "timesignature": "4"                  // optional
+            "bpm":           120,         // optional
+            "keyscale":      "C major",   // optional
+            "timesignature": "4"          // optional
         }
     ],
 
-    "lora_name":             "my_style",   // subfolder name on the volume
+    "lora_name":             "my_style",
 
-    "lora_rank":             64,           // LoRA rank (A100: 64-128 recommended)
-    "lora_alpha":            64,           // usually equal to rank
+    "lora_rank":             64,
+    "lora_alpha":            64,
     "lora_dropout":          0.05,
     "target_modules":        ["to_q", "to_k", "to_v", "to_out.0"],
 
     "max_epochs":            500,
-    "batch_size":            2,            // A100 80GB: 2-4 safe at rank 64
+    "batch_size":            2,
     "learning_rate":         3e-4,
     "gradient_accumulation": 1,
     "save_every_n_epochs":   100,
     "shift":                 3.0,
     "seed":                  42,
-    "precision":             "bf16",       // "bf16" recommended on A100
-    "optimizer":             "adamw"       // "adamw" or "adamw8bit"
+    "precision":             "bf16",
+    "optimizer":             "adamw"
 }
 
-OUTPUT (success):
+OUTPUT:
 {
     "output": {
         "status":                "success",
@@ -94,14 +94,14 @@ def _download_audio(url: str, dest: str) -> None:
 def _find_final_lora(output_dir: str) -> Optional[str]:
     """Find the best available LoRA weights directory after training."""
     out = Path(output_dir)
-    # Prefer explicit 'final' export
+    # 1. Explicit 'final' export directory
     if (out / "final").exists() and any((out / "final").iterdir()):
         return str(out / "final")
-    # Fall back to latest epoch checkpoint
+    # 2. Latest epoch checkpoint
     epoch_dirs = sorted(out.glob("epoch_*"), key=lambda p: int(p.name.split("_")[1]))
     if epoch_dirs:
         return str(epoch_dirs[-1])
-    # Fall back to root if weights are there directly
+    # 3. Weights in root
     if (out / "adapter_model.safetensors").exists():
         return str(out)
     return None
@@ -112,6 +112,15 @@ def _find_final_lora(output_dir: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _build_dataset(audio_files: list, work_dir: str) -> str:
+    """
+    Download audio files and preprocess to .pt tensors.
+
+    DatasetBuilder API (confirmed from source):
+      - Constructor takes NO arguments
+      - It uses the AceStepHandler service that was already initialized
+      - Samples are set directly on builder.samples
+      - preprocess_to_tensors(output_dir) returns (output_paths, status)
+    """
     from acestep.training.dataset_builder import DatasetBuilder, AudioSample
     from acestep.handler import AceStepHandler
 
@@ -120,6 +129,7 @@ def _build_dataset(audio_files: list, work_dir: str) -> str:
     audio_dir.mkdir(parents=True)
     tensors_dir.mkdir(parents=True)
 
+    # Download audio
     print(f"[Training] Downloading {len(audio_files)} audio file(s)...")
     samples = []
     for i, af in enumerate(audio_files):
@@ -142,9 +152,9 @@ def _build_dataset(audio_files: list, work_dir: str) -> str:
             timesignature = str(af.get("timesignature", "")),
         ))
 
-    # DiT handler needed to encode audio + text into training tensors
-    print(f"[Training] Loading DiT for preprocessing...")
-    from acestep.handler import AceStepHandler
+    # Initialize the AceStepHandler service first.
+    # DatasetBuilder reads from this already-loaded service for VAE + text encoder.
+    print(f"[Training] Initializing AceStepHandler service for preprocessing...")
     dit = AceStepHandler()
     dit.initialize_service(
         project_root=CHECKPOINT_DIR,
@@ -153,10 +163,15 @@ def _build_dataset(audio_files: list, work_dir: str) -> str:
         offload_to_cpu=False,
     )
 
-    print(f"[Training] Preprocessing audio to tensors...")
-    builder = DatasetBuilder(dit_handler=dit)
-    builder.preprocess_to_tensors(samples=samples, output_dir=str(tensors_dir))
-    print(f"[Training] Tensors ready: {tensors_dir}")
+    # Create DatasetBuilder with NO constructor args — it picks up the
+    # already-initialized service internally.
+    print(f"[Training] Preprocessing {len(samples)} sample(s) to tensors...")
+    builder = DatasetBuilder()
+    builder.samples = samples   # set samples directly on the state object
+
+    output_paths, status = builder.preprocess_to_tensors(str(tensors_dir))
+    print(f"[Training] Preprocessing complete — status: {status}")
+    print(f"[Training] Tensors at: {tensors_dir}")
     return str(tensors_dir)
 
 
@@ -192,20 +207,26 @@ def _run_training(tensors_dir: str, lora_out: str, inp: dict) -> dict:
         device                  = DEVICE,
     )
 
-    print(f"[Training] Starting LoRA — rank={lora_cfg.rank} epochs={train_cfg.max_epochs} "
-          f"batch={train_cfg.batch_size} precision={train_cfg.precision} optimizer={train_cfg.optimizer}")
+    print(
+        f"[Training] Starting LoRA training —"
+        f" rank={lora_cfg.rank}"
+        f" epochs={train_cfg.max_epochs}"
+        f" batch={train_cfg.batch_size}"
+        f" precision={train_cfg.precision}"
+        f" optimizer={train_cfg.optimizer}"
+    )
 
     t0      = time.time()
     trainer = LoRATrainer(lora_config=lora_cfg, train_config=train_cfg)
     metrics = trainer.train()
     elapsed = int(time.time() - t0)
 
-    print(f"[Training] Complete in {elapsed}s — {metrics}")
+    print(f"[Training] Done in {elapsed}s — metrics: {metrics}")
     return {**metrics, "training_time_seconds": elapsed}
 
 
 # ---------------------------------------------------------------------------
-# Stage 3: Save to network volume
+# Stage 3: Save weights to network volume
 # ---------------------------------------------------------------------------
 
 def _save_to_volume(final_lora_dir: str, lora_name: str) -> dict:
@@ -218,10 +239,8 @@ def _save_to_volume(final_lora_dir: str, lora_name: str) -> dict:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, target)
 
-    lora_files = [
-        str(f.relative_to(dest)) for f in dest.rglob("*") if f.is_file()
-    ]
-    print(f"[Training] LoRA saved to volume: {dest}")
+    lora_files = [str(f.relative_to(dest)) for f in dest.rglob("*") if f.is_file()]
+    print(f"[Training] LoRA saved → {dest}")
     print(f"[Training] Files: {lora_files}")
     return {
         "lora_path":  str(dest),
@@ -242,14 +261,14 @@ def handler(job: dict) -> dict:
 
     lora_name = inp.get("lora_name", "lora")
 
-    # Validate network volume is mounted
+    # Validate network volume is mounted before starting
     vol = Path(LORA_OUTPUT_DIR)
     if not vol.parent.exists():
         return {
             "error": (
                 f"Network volume not mounted at '{vol.parent}'. "
                 "Attach a Network Volume to this endpoint and set "
-                "LORA_OUTPUT_DIR env var (default: /runpod-volume/loras)."
+                f"LORA_OUTPUT_DIR env var (default: {LORA_OUTPUT_DIR})."
             )
         }
 
