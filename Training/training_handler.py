@@ -115,11 +115,12 @@ def _build_dataset(audio_files: list, work_dir: str) -> str:
     """
     Download audio files and preprocess to .pt tensors.
 
-    DatasetBuilder API (confirmed from source):
-      - Constructor takes NO arguments
-      - It uses the AceStepHandler service that was already initialized
-      - Samples are set directly on builder.samples
-      - preprocess_to_tensors(output_dir) returns (output_paths, status)
+    Confirmed DatasetBuilder API:
+      builder = DatasetBuilder()                              # no constructor args
+      output_paths, status = builder.preprocess_to_tensors(  # samples as positional arg
+          samples,
+          output_dir
+      )
     """
     from acestep.training.dataset_builder import DatasetBuilder, AudioSample
     from acestep.handler import AceStepHandler
@@ -152,9 +153,9 @@ def _build_dataset(audio_files: list, work_dir: str) -> str:
             timesignature = str(af.get("timesignature", "")),
         ))
 
-    # Initialize the AceStepHandler service first.
-    # DatasetBuilder reads from this already-loaded service for VAE + text encoder.
-    print(f"[Training] Initializing AceStepHandler service for preprocessing...")
+    # Initialize AceStepHandler — DatasetBuilder uses this loaded service
+    # internally for VAE encoding and text encoding.
+    print(f"[Training] Initializing AceStepHandler for preprocessing...")
     dit = AceStepHandler()
     dit.initialize_service(
         project_root=CHECKPOINT_DIR,
@@ -163,14 +164,14 @@ def _build_dataset(audio_files: list, work_dir: str) -> str:
         offload_to_cpu=False,
     )
 
-    # Create DatasetBuilder with NO constructor args — it picks up the
-    # already-initialized service internally.
+    # ── KEY FIX ───────────────────────────────────────────────────────────────
+    # preprocess_to_tensors(samples, output_dir) — samples is a required
+    # positional arg, NOT set via builder.samples attribute.
     print(f"[Training] Preprocessing {len(samples)} sample(s) to tensors...")
     builder = DatasetBuilder()
-    builder.samples = samples   # set samples directly on the state object
+    output_paths, status = builder.preprocess_to_tensors(samples, str(tensors_dir))
 
-    output_paths, status = builder.preprocess_to_tensors(str(tensors_dir))
-    print(f"[Training] Preprocessing complete — status: {status}")
+    print(f"[Training] Preprocessing status: {status}")
     print(f"[Training] Tensors at: {tensors_dir}")
     return str(tensors_dir)
 
@@ -208,7 +209,7 @@ def _run_training(tensors_dir: str, lora_out: str, inp: dict) -> dict:
     )
 
     print(
-        f"[Training] Starting LoRA training —"
+        f"[Training] Starting LoRA —"
         f" rank={lora_cfg.rank}"
         f" epochs={train_cfg.max_epochs}"
         f" batch={train_cfg.batch_size}"
@@ -261,7 +262,7 @@ def handler(job: dict) -> dict:
 
     lora_name = inp.get("lora_name", "lora")
 
-    # Validate network volume is mounted before starting
+    # Validate network volume is mounted before doing any work
     vol = Path(LORA_OUTPUT_DIR)
     if not vol.parent.exists():
         return {

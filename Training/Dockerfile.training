@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir "huggingface-hub[cli,hf_transfer]"
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
 # Main bundle: VAE + Qwen3-Embedding text encoder
-# Skip LM — not needed for training
+# Skip LM and turbo DiT — not needed for training, saves image size
 RUN python -c "import os; from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/Ace-Step1.5', local_dir='/models/checkpoints', token=os.environ.get('HF_TOKEN'), ignore_patterns=['acestep-v15-turbo/*', 'acestep-5Hz-lm-1.7B/*'])"
 
 # Base DiT — the model LoRA trains on top of
@@ -70,14 +70,15 @@ RUN uv pip install --system --no-cache \
 
 RUN ln -s /app/checkpoints /usr/local/lib/python3.11/dist-packages/checkpoints
 
-# Copy baked-in checkpoints
-COPY --from=model-downloader /models/checkpoints /app/checkpoints
+# ── KEY FIX 1 ─────────────────────────────────────────────────────────────────
+# ACE-Step resolves models to /app/checkpoints/checkpoints (one level deeper
+# than CHECKPOINT_DIR). Copy downloaded models to the correct nested path.
+COPY --from=model-downloader /models/checkpoints /app/checkpoints/checkpoints
 
-# ── KEY FIX ──────────────────────────────────────────────────────────────────
-# check_main_model_exists() looks for acestep-v15-turbo regardless of which
-# DiT model we actually use. Without this placeholder it triggers a full
-# re-download at runtime, fills the disk, and the job dies.
-RUN mkdir -p /app/checkpoints/acestep-v15-turbo
+# ── KEY FIX 2 ─────────────────────────────────────────────────────────────────
+# check_main_model_exists() always looks for acestep-v15-turbo regardless of
+# which DiT we use. Placeholder stops the runtime re-download that fills disk.
+RUN mkdir -p /app/checkpoints/checkpoints/acestep-v15-turbo
 
 RUN mkdir -p /app/outputs /tmp/training
 
