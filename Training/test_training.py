@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 """
-Standalone Training Test Script for ACE-Step 1.5 — Round 2
-============================================================
-Uses confirmed real API signatures from Step 0 introspection.
+ACE-Step 1.5 Training Test — Round 3
+======================================
+Key insight from GitHub issue trace:
+  DatasetBuilder.samples is populated by loading a dataset JSON file,
+  NOT by passing Python objects directly.
 
-Run on the pod:
+The Gradio UI flow is:
+  1. Scan audio folder → creates AudioSample objects
+  2. User labels them → sets labeled=True
+  3. Save Dataset → writes dataset.json
+  4. Load Dataset (for training) → builder.load_dataset(json_path)
+  5. Preprocess → builder.preprocess_to_tensors(dit_handler, output_dir)
+  6. Train → LoRATrainer(dit_handler, lora_cfg, train_cfg).train(tensors_dir)
+
+We replicate steps 1-6 programmatically.
+
+Run on pod:
     python /app/test_training.py
 """
 
@@ -23,7 +35,7 @@ sys.path.insert(0, "/app")
 # =============================================================================
 # CONFIG
 # =============================================================================
-CHECKPOINT_DIR = "/app/checkpoints"   # initialize_service project_root
+CHECKPOINT_DIR = "/app/checkpoints"
 DIT_MODEL      = "acestep-v15-base"
 DEVICE         = "cuda"
 OUTPUT_DIR     = "/tmp/test_lora_output"
@@ -46,24 +58,30 @@ def info(m): print(f"  →  {m}")
 # Imports
 # ---------------------------------------------------------------------------
 section("Imports")
-
 from acestep.training.dataset_builder import DatasetBuilder, AudioSample
 from acestep.training.trainer import LoRATrainer
 from acestep.training.configs import LoRAConfig, TrainingConfig
 from acestep.handler import AceStepHandler
+ok("All imports OK")
 
-ok("All imports successful")
+# Print all DatasetBuilder methods so we can see load_dataset etc.
+methods = [m for m in dir(DatasetBuilder) if not m.startswith("__")]
+info(f"DatasetBuilder methods: {methods}")
 
 # ---------------------------------------------------------------------------
 # Step 1: Download audio
 # ---------------------------------------------------------------------------
 section("STEP 1: Download audio")
 
-work_dir  = tempfile.mkdtemp(prefix="acetrain_test_")
-audio_dir = Path(work_dir) / "audio"
+work_dir    = tempfile.mkdtemp(prefix="acetrain_test_")
+audio_dir   = Path(work_dir) / "audio"
+tensors_dir = Path(work_dir) / "tensors"
+lora_out    = Path(work_dir) / "lora_output"
 audio_dir.mkdir()
-audio_dest = str(audio_dir / TEST_AUDIO_NAME)
+tensors_dir.mkdir()
+lora_out.mkdir()
 
+audio_dest = str(audio_dir / TEST_AUDIO_NAME)
 info(f"Work dir: {work_dir}")
 
 import urllib.request
@@ -74,9 +92,42 @@ with urllib.request.urlopen(req, timeout=60) as r:
 ok(f"Downloaded {TEST_AUDIO_NAME} ({Path(audio_dest).stat().st_size // 1024}KB)")
 
 # ---------------------------------------------------------------------------
-# Step 2: Load AceStepHandler
+# Step 2: Write dataset.json the way the Gradio UI does
 # ---------------------------------------------------------------------------
-section("STEP 2: Load AceStepHandler")
+section("STEP 2: Build dataset.json")
+
+# AudioSample fields confirmed: id, audio_path, filename, caption, genre,
+# lyrics, raw_lyrics, formatted_lyrics, bpm, keyscale, timesignature,
+# duration, language, is_instrumental, custom_tag, labeled, prompt_override
+
+dataset = [
+    {
+        "audio_path":    audio_dest,
+        "filename":      TEST_AUDIO_NAME,
+        "caption":       "Upbeat electronic track with synthesizers and driving drums",
+        "lyrics":        "[Verse 1]\nTest verse lyrics here\n\n[Chorus]\nLa la la test",
+        "language":      "en",
+        "bpm":           None,
+        "keyscale":      "",
+        "timesignature": "",
+        "duration":      None,
+        "genre":         "",
+        "is_instrumental": False,
+        "labeled":       True,       # ← gates preprocessing
+        "custom_tag":    "",
+        "prompt_override": "",
+    }
+]
+
+dataset_json = str(Path(work_dir) / "dataset.json")
+with open(dataset_json, "w") as f:
+    json.dump(dataset, f, indent=2)
+ok(f"Wrote dataset.json: {dataset_json}")
+
+# ---------------------------------------------------------------------------
+# Step 3: Load AceStepHandler
+# ---------------------------------------------------------------------------
+section("STEP 3: Load AceStepHandler")
 
 dit = AceStepHandler()
 dit.initialize_service(
@@ -88,72 +139,69 @@ dit.initialize_service(
 ok("AceStepHandler initialized")
 
 # ---------------------------------------------------------------------------
-# Step 3: Build AudioSample + preprocess
+# Step 4: Load dataset into DatasetBuilder + preprocess
 # ---------------------------------------------------------------------------
-section("STEP 3: Preprocess audio -> tensors")
-
-tensors_dir = Path(work_dir) / "tensors"
-tensors_dir.mkdir()
-
-# Confirmed real AudioSample fields:
-# id, audio_path, filename, caption, genre, lyrics, raw_lyrics,
-# formatted_lyrics, bpm, keyscale, timesignature, duration, language,
-# is_instrumental, custom_tag, labeled, prompt_override
-#
-# KEY: labeled=True is required — without it the preprocessor sees
-# "No samples to preprocess" and returns an empty list
-
-sample = AudioSample(
-    audio_path = audio_dest,
-    filename   = TEST_AUDIO_NAME,
-    caption    = "Upbeat electronic track with synthesizers and driving drums",
-    lyrics     = "[Verse 1]\nTest verse lyrics here\n\n[Chorus]\nLa la la test",
-    language   = "en",
-    labeled    = True,
-)
-info(f"AudioSample created: labeled={sample.labeled}")
+section("STEP 4: Load dataset into builder + preprocess")
 
 builder = DatasetBuilder()
+info(f"builder.samples before load: {builder.samples}")
 
-# Confirmed real signature:
-# preprocess_to_tensors(self, dit_handler, output_dir, max_duration, preprocess_mode, progress_callback)
-info("Calling preprocess_to_tensors(dit_handler, output_dir)...")
+# Try loading via JSON file — this is how Gradio UI populates builder.samples
+loaded = False
+for method_name in ["load_dataset", "load_from_json", "load_json", "from_json"]:
+    if hasattr(builder, method_name):
+        info(f"Found method: {method_name}{inspect.signature(getattr(builder, method_name))}")
+        try:
+            getattr(builder, method_name)(dataset_json)
+            info(f"builder.samples after {method_name}: {len(builder.samples)} items")
+            loaded = True
+            break
+        except Exception as e:
+            info(f"  {method_name} failed: {e}")
+
+if not loaded:
+    # Fallback: set samples directly using AudioSample objects
+    info("No load method found — setting builder.samples directly from AudioSample objects")
+    samples = []
+    for entry in dataset:
+        s = AudioSample()
+        for k, v in entry.items():
+            if hasattr(s, k) and v is not None:
+                setattr(s, k, v)
+        samples.append(s)
+    builder.samples = samples
+    info(f"builder.samples set to {len(builder.samples)} items")
+    info(f"Sample labeled={builder.samples[0].labeled}, audio_path={builder.samples[0].audio_path}")
+
+# Now preprocess
+info("Calling preprocess_to_tensors(dit, tensors_dir)...")
 try:
-    output_paths, status = builder.preprocess_to_tensors(
-        dit,
-        str(tensors_dir),
-    )
-    info(f"Status: {status}")
-    info(f"Output paths: {output_paths}")
+    output_paths, status = builder.preprocess_to_tensors(dit, str(tensors_dir))
+    info(f"Status:  {status}")
+    info(f"Outputs: {output_paths}")
 except Exception as e:
     fail(f"preprocess_to_tensors failed: {e}")
     traceback.print_exc()
     sys.exit(1)
 
-# Verify tensors were created
-tensor_files = (
-    list(tensors_dir.rglob("*.pt")) +
-    list(tensors_dir.rglob("*.safetensors")) +
-    list(tensors_dir.rglob("*.json"))
-)
+# Verify
+all_files = list(tensors_dir.rglob("*"))
+tensor_files = [f for f in all_files if f.is_file()]
 if tensor_files:
-    ok(f"Tensor files created: {[f.name for f in tensor_files]}")
+    ok(f"Tensor files created:")
+    for f in tensor_files:
+        info(f"  {f.name}  ({f.stat().st_size // 1024}KB)")
 else:
-    fail("Still no tensor files. Full dir tree:")
-    for p in sorted(tensors_dir.rglob("*")):
-        info(f"  {p}")
-    info(f"builder.samples: {getattr(builder, 'samples', 'N/A')}")
+    fail("No tensor files found")
+    info(f"Dir contents: {all_files}")
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
-# Step 4: LoRA training
+# Step 5: LoRA training
 # ---------------------------------------------------------------------------
-section("STEP 4: LoRA training (5 epochs smoke test)")
+section("STEP 5: LoRA training (5 epochs)")
 
-lora_out = Path(work_dir) / "lora_output"
-lora_out.mkdir()
-
-# Confirmed real LoRAConfig fields: r (NOT rank), alpha, dropout, target_modules, bias
+# Confirmed: r (not rank), alpha, dropout, target_modules, bias
 lora_cfg = LoRAConfig(
     r              = TEST_LORA_RANK,
     alpha          = TEST_LORA_RANK,
@@ -162,13 +210,7 @@ lora_cfg = LoRAConfig(
 )
 ok(f"LoRAConfig: r={TEST_LORA_RANK}")
 
-# Confirmed real TrainingConfig fields (no checkpoint_dir, no dit_model):
-# shift, num_inference_steps, learning_rate, batch_size,
-# gradient_accumulation_steps, max_epochs, save_every_n_epochs,
-# warmup_steps, weight_decay, max_grad_norm, mixed_precision,
-# use_fp8, gradient_checkpointing, seed, output_dir,
-# num_workers, pin_memory, prefetch_factor, persistent_workers,
-# pin_memory_device, log_every_n_steps, val_split
+# Confirmed: no checkpoint_dir/dit_model fields
 train_cfg = TrainingConfig(
     output_dir                  = str(lora_out),
     max_epochs                  = TEST_MAX_EPOCHS,
@@ -182,37 +224,27 @@ train_cfg = TrainingConfig(
 )
 ok("TrainingConfig created")
 
-# Confirmed real LoRATrainer signature:
-# LoRATrainer(self, dit_handler, lora_config, training_config)
-info("Instantiating LoRATrainer(dit, lora_cfg, train_cfg)...")
-try:
-    trainer = LoRATrainer(dit, lora_cfg, train_cfg)
-    ok("LoRATrainer instantiated")
-except Exception as e:
-    fail(f"LoRATrainer failed: {e}")
-    traceback.print_exc()
-    sys.exit(1)
+# Confirmed: LoRATrainer(dit_handler, lora_config, training_config)
+trainer = LoRATrainer(dit, lora_cfg, train_cfg)
+ok("LoRATrainer instantiated")
 
-# Introspect train() before calling — we need to know if it takes dataset_dir
+# Introspect train() — need to know if it takes tensors_dir or not
 train_sig = inspect.signature(trainer.train)
 info(f"trainer.train signature: {train_sig}")
 
-# Try train(tensors_dir) first, fall back to train() if no args needed
-info(f"Starting training ({TEST_MAX_EPOCHS} epochs)...")
+# Try with tensors_dir first, fall back to no args
+info(f"Training for {TEST_MAX_EPOCHS} epochs...")
 try:
     t0     = time.time()
     result = trainer.train(str(tensors_dir))
-    ok(f"train(tensors_dir) worked — completed in {int(time.time()-t0)}s")
-    info(f"Returned: {result}")
-except TypeError as e:
-    info(f"train(tensors_dir) failed ({e}) — trying train() with no args...")
+    ok(f"train(tensors_dir) succeeded in {int(time.time()-t0)}s → {result}")
+except TypeError:
     try:
         t0     = time.time()
         result = trainer.train()
-        ok(f"train() worked — completed in {int(time.time()-t0)}s")
-        info(f"Returned: {result}")
-    except Exception as e2:
-        fail(f"train() also failed: {e2}")
+        ok(f"train() succeeded in {int(time.time()-t0)}s → {result}")
+    except Exception as e:
+        fail(f"train() failed: {e}")
         traceback.print_exc()
         sys.exit(1)
 except Exception as e:
@@ -221,9 +253,9 @@ except Exception as e:
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
-# Step 5: Verify output
+# Step 6: Verify output
 # ---------------------------------------------------------------------------
-section("STEP 5: Verify output")
+section("STEP 6: Verify LoRA output")
 
 info("Files in lora_output:")
 for f in sorted(lora_out.rglob("*")):
@@ -232,25 +264,14 @@ for f in sorted(lora_out.rglob("*")):
 
 safetensors = list(lora_out.rglob("*.safetensors"))
 if safetensors:
-    ok(f"LoRA weights: {[f.name for f in safetensors]}")
+    ok(f"LoRA weights found: {[f.name for f in safetensors]}")
 else:
     fail("No .safetensors found")
 
 if Path(OUTPUT_DIR).exists():
     shutil.rmtree(OUTPUT_DIR)
 shutil.copytree(str(lora_out), OUTPUT_DIR)
-ok(f"Output copied to {OUTPUT_DIR}")
+ok(f"Copied to {OUTPUT_DIR}")
 shutil.rmtree(work_dir, ignore_errors=True)
 
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-section("CONFIRMED SIGNATURES — paste output to get final training_handler.py")
-info("AudioSample:           labeled=True is required")
-info("preprocess_to_tensors: builder.preprocess_to_tensors(dit_handler, output_dir)")
-info("LoRAConfig:            r=N  (not rank=N)")
-info("TrainingConfig:        mixed_precision='bf16', gradient_accumulation_steps=N")
-info("LoRATrainer:           LoRATrainer(dit_handler, lora_config, training_config)")
-info("trainer.train:         see above for confirmed call signature")
-print()
-ok("Done — paste this output back to get the final training_handler.py")
+section("ALL DONE — paste output to get final training_handler.py")
