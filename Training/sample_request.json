@@ -1,0 +1,50 @@
+{
+  "_comment": "ACE-Step 1.5 Training — sample RunPod request body",
+
+  "input": {
+    "audio_files": [
+      {
+        "url":             "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+        "filename":        "song_01.mp3",
+        "caption":         "Upbeat electronic track with driving synthesizers, punchy drums, and a bright melodic lead",
+        "genre":           "electronic, synth-pop, dance",
+        "lyrics":          "[Verse 1]\nTest verse one\nSecond line here\n\n[Chorus]\nLa la la test chorus\nRepeat again\n\n[Verse 2]\nVerse two content\nMore lyrics here\n\n[Chorus]\nLa la la test chorus\nRepeat again",
+        "bpm":             128,
+        "keyscale":        "A minor",
+        "timesignature":   "4",
+        "is_instrumental": false,
+        "language":        "en",
+        "custom_tag":      ""
+      },
+      {
+        "url":             "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
+        "filename":        "song_02.mp3",
+        "caption":         "Chill ambient track with warm pads, subtle bass, and ethereal textures",
+        "genre":           "ambient, electronic, chillout",
+        "bpm":             90,
+        "keyscale":        "D major",
+        "timesignature":   "4",
+        "is_instrumental": true,
+        "language":        "en"
+      }
+    ],
+
+    "lora_name": "my_electronic_style",
+
+    "_comment_lora": "LoRA architecture — rank 64 is standard; lower rank (4-16) = faster, less capacity",
+    "lora_rank":    64,
+    "lora_alpha":   64,
+    "lora_dropout": 0.05,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+
+    "_comment_train": "Training hyperparameters",
+    "max_epochs":            100,
+    "batch_size":            1,
+    "learning_rate":         0.0001,
+    "gradient_accumulation": 1,
+    "save_every_n_epochs":   100,
+    "shift":                 3.0,
+    "seed":                  42,
+    "precision":             "bf16"
+  }
+}
