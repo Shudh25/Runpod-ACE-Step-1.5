@@ -1,5 +1,5 @@
 # =============================================================================
-# Demucs - RunPod Serverless Worker
+# Demucs Stem Separation - RunPod Serverless Worker
 # =============================================================================
 
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
@@ -7,11 +7,11 @@ FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
-    OUTPUT_DIR=/runpod-volume/demucs_outputs
+    DEVICE=cuda
 
 WORKDIR /app
 
-# Install system deps
+# System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3-pip \
@@ -23,14 +23,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python
 
-# Install PyTorch (CUDA compatible)
-RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# PyTorch cu121 — ships torchaudio with soundfile backend (no torchcodec issues)
+RUN pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Install Demucs
-RUN pip install demucs runpod
+# Demucs + RunPod SDK + boto3 for S3 uploads
+RUN pip install demucs runpod boto3
 
-# Create output dir
-RUN mkdir -p /runpod-volume/demucs_outputs
+# Pre-bake model weights — avoids cold-start download
+RUN python -c "from demucs.pretrained import get_model; get_model('htdemucs')"
 
 COPY demucs_handler.py /app/demucs_handler.py
 
