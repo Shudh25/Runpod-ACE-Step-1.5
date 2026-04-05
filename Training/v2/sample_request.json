@@ -1,0 +1,45 @@
+{
+    "_comment": "ACE-Step 1.5 Training — sample RunPod request body",
+    "input": {
+        "audio_files": [
+            {
+                "url": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
+                "filename": "song_02.mp3",
+                "caption": "Chill ambient track with warm pads, subtle bass, and ethereal textures",
+                "genre": "ambient, electronic, chillout",
+                "bpm": 90,
+                "keyscale": "D major",
+                "timesignature": "4",
+                "is_instrumental": true,
+                "language": "en"
+            }
+        ],
+        "lora_name": "my_electronic_style",
+        "_comment_lora": "LoRA architecture — rank 64 is standard; lower rank (4-16) = faster, less capacity",
+        "lora_rank": 64,
+        "lora_alpha": 64,
+        "lora_dropout": 0.05,
+        "target_modules": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj"
+        ],
+        "_comment_train": "Training hyperparameters",
+        "max_epochs": 100,
+        "batch_size": 1,
+        "learning_rate": 0.0001,
+        "gradient_accumulation": 1,
+        "save_every_n_epochs": 100,
+        "shift": 3,
+        "seed": 42,
+        "precision": "bf16",
+        "s3_config": {
+            "endpoint": "https://s3api-eu-ro-1.runpod.io",
+            "bucket": "BUCKET_NAME_HERE",
+            "region": "REGION_NAME_HERE",
+            "access_key": "YOUR_ACCESS_KEY_HERE",
+            "secret_key": "YOUR_SECRET_KEY_HERE"
+        }
+    }
+}
